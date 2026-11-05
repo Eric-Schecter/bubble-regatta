@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#9acbc9">
+<title>Bubble Regatta</title>
+<meta name="description" content="A sunny little boat race with your favorite animal captains.">
+<link rel="icon" href="index.png">
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#8dbebf;color:#fff8e8;font-family:system-ui,sans-serif}#canvas{display:block;width:100%;height:100%;outline:0;touch-action:none}
+#launch{position:fixed;inset:0;z-index:2;display:grid;place-items:center;padding:24px;isolation:isolate;background:#8dbebf}#launch:before{content:"";position:absolute;inset:-50px;z-index:-1;background:linear-gradient(#8bbfbf55,#416e7b99),url(cover.png) center/cover;filter:blur(28px)}
+.cover-card{position:relative;width:min(320px,72vw,calc(60svh * 16 / 9));aspect-ratio:16/9;border-radius:18px;background:#9acbc9 url(cover.png) center/cover no-repeat;box-shadow:0 28px 80px #163d5266,0 4px 16px #163d5233;border:1px solid #fff8e860;transition:transform .18s,filter .18s}
+.cover-card:has(#play:not(:disabled)):hover,.cover-card:focus-within{transform:scale(1.018);filter:brightness(1.025)}.cover-card:has(#play:not(:disabled)):active{transform:scale(.99)}
+#play{position:absolute;inset:0;width:100%;height:100%;padding:0;border:0;border-radius:inherit;background:transparent;cursor:pointer}#play:focus-visible{outline:3px solid #fff0c1;outline-offset:5px}#play:disabled{cursor:wait}[hidden]{display:none!important}
+.panel{position:absolute;left:0;right:0;top:calc(100% + 24px);display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;pointer-events:none}#status{margin:0;font-size:13px;letter-spacing:.04em;text-shadow:0 1px 4px #244f62}#status:empty{display:none}progress{appearance:none;width:180px;height:5px;border:0;border-radius:9px;overflow:hidden;background:#fff8e840;accent-color:#fff0c1}progress::-webkit-progress-bar{background:#fff8e840;border-radius:9px}progress::-webkit-progress-value{background:#fff0c1;border-radius:9px}progress:indeterminate{animation:breathe 1.3s ease-in-out infinite}#error{max-width:560px;margin:0;padding:12px 16px;border-radius:12px;background:#355b6de6;font-size:13px;white-space:pre-wrap}#error:empty{display:none}@keyframes breathe{50%{opacity:.4}}@media(prefers-reduced-motion:reduce){.cover-card,progress{transition:none;animation:none}.cover-card:has(#play:not(:disabled)):hover,.cover-card:has(#play:not(:disabled)):active{transform:none}}
+</style>
+$GODOT_HEAD_INCLUDE
+</head>
+<body>
+<canvas id="canvas" tabindex="0" aria-label="Bubble Regatta game">Your browser needs WebGL 2 to play Bubble Regatta.</canvas>
+<section id="launch" aria-label="Bubble Regatta game cover"><div class="cover-card"><button id="play" aria-label="Play Bubble Regatta" hidden disabled></button><div class="panel"><progress id="progress" aria-label="Loading game"></progress><p id="status" role="status">Loading Bubble Regatta…</p><p id="error" role="alert"></p></div></div></section>
+<script src="$GODOT_URL"></script>
+<script>
+const config=$GODOT_CONFIG;
+const canvas=document.getElementById('canvas'),play=document.getElementById('play'),bar=document.getElementById('progress'),status=document.getElementById('status');
+config.canvas=canvas;
+const assets=$REGATTA_ASSETS;
+const nativeFetch=window.fetch.bind(window),downloaded={};
+const compressed=typeof DecompressionStream!=='undefined';
+const totalBytes=Object.values(assets).reduce((n,a)=>n+(compressed?a.size:a.rawSize),0);
+let loadFailed=false;
+function progress(stage,current,total){
+ if(loadFailed)return;
+ bar.max=total;bar.value=current;
+ if(stage==='download')status.textContent=`Downloading · ${(current/1e6).toFixed(1)} / ${(total/1e6).toFixed(1)} MB`;
+ else if(stage==='course')status.textContent=`Building course · ${Math.floor(current/total*100)}%`;
+ else if(stage==='captains')status.textContent=`Preparing captains · ${current} / ${total}`;
+ else status.textContent=`Rendering · ${current} / ${total}`;
+}
+window.regattaProgress=progress;
+config.onProgress=()=>{};
+// Only intercept this game's two payloads. Other fetches use the browser unchanged.
+window.fetch=async(input,options)=>{
+ const url=new URL(typeof input==='string'?input:input.url,location.href);
+ const name=url.pathname.split('/').pop(),asset=assets[name];
+ if(!asset||url.origin!==location.origin||url.pathname!==new URL(name,location.href).pathname)return nativeFetch(input,options);
+ const response=await nativeFetch(compressed?new URL(asset.url,location.href):input,options);
+ if(!response.ok)throw new Error(`Download failed (${response.status}): ${name}`);
+ const reader=response.body.getReader(),chunks=[];let count=0;
+ while(true){const {done,value}=await reader.read();if(done)break;chunks.push(value);count+=value.byteLength;downloaded[name]=count;progress('download',Object.values(downloaded).reduce((a,b)=>a+b,0),totalBytes);}
+ const bytes=new Uint8Array(count);let offset=0;for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+ let body=bytes;
+ // Some hosts decode gzip automatically. Inspect magic bytes to avoid decoding twice.
+ if(compressed&&bytes[0]===31&&bytes[1]===139)body=await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+ return new Response(body,{headers:{'Content-Type':asset.type}});
+};
+progress('download',0,totalBytes);
+const engine=new Engine(config),executable=config.executable,pack=config.mainPack||`${executable}.pck`;
+let ready=false;
+function showError(message){loadFailed=true;ready=false;document.getElementById('error').textContent=String(message);status.textContent='Unable to load';bar.hidden=true;play.hidden=true;}
+// Ready means the first game scene has rendered, not just downloaded.
+window.regattaEntered=false;
+window.regattaHidden=document.hidden;
+document.addEventListener('visibilitychange',()=>{window.regattaHidden=document.hidden;});
+window.regattaReady=()=>{ready=true;bar.hidden=true;status.textContent='';play.hidden=false;play.disabled=false;};
+const audioContexts=[];
+for(const name of ['AudioContext','webkitAudioContext']){
+ const Original=window[name];
+ if(Original)window[name]=new Proxy(Original,{construct(Target,args){const context=new Target(...args);audioContexts.push(context);return context;}});
+}
+Promise.all([Engine.load(executable,config.fileSizes?.[`${executable}.wasm`]).then(()=>engine.init(executable)),engine.preloadFile(pack,pack)]).then(async()=>{
+ window.fetch=nativeFetch;status.textContent='Starting engine…';bar.removeAttribute('value');
+ await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+ await engine.start({args:['--main-pack',pack,...(config.args||[]),'--','--web-entered',...(new URLSearchParams(location.search).has('perf')?['--perf-review']:[])]});
+}).catch(showError);
+const hoverSound=new Audio('hover.wav'),pressSound=new Audio('press.wav');
+hoverSound.volume=.45;pressSound.volume=.65;
+let lastHover=-Infinity;
+function sound(clip){clip.currentTime=0;const pending=clip.play();if(pending)pending.catch(()=>{});}
+play.addEventListener('pointerenter',()=>{const now=performance.now();if(ready&&now-lastHover>180){sound(hoverSound);lastHover=now;}});
+play.addEventListener('focus',()=>{if(ready&&!play.matches(':hover'))sound(hoverSound);});
+play.addEventListener('click',()=>{
+ if(!ready)return;
+ ready=false;play.disabled=true;
+ for(const context of audioContexts)if(context.state==='suspended')context.resume().catch(()=>{});
+ sound(pressSound);window.regattaEntered=true;
+ document.getElementById('launch').remove();canvas.focus();
+});
+window.addEventListener('keydown',e=>{if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)&&document.activeElement===canvas)e.preventDefault();});
+</script>
+</body>
+</html>
